@@ -79,9 +79,28 @@ def run_once(campaign_id: str, batch_size: int, dry_run: bool = False, since: da
         # Handle lead_data - it can be array or object
         lead_data_raw = lead.get("lead_data", {})
         if isinstance(lead_data_raw, list) and lead_data_raw:
-            lead_data = lead_data_raw[0]  # Take first item if it's an array
+            # For lead_data arrays, we need to process each recipient separately
+            # Check which recipients haven't been processed for this step yet
+            progress = lead.get("progress", {})
+            current_step_order = progress.get("current_step_order", 1)
+            processed_recipients = progress.get("processed_recipients", {})
+            
+            # Find recipients that haven't been processed for current step
+            recipients_to_process = []
+            for i, recipient_data in enumerate(lead_data_raw):
+                recipient_key = f"step_{current_step_order}_recipient_{i}"
+                if recipient_key not in processed_recipients:
+                    recipients_to_process.append((i, recipient_data))
+            
+            if not recipients_to_process:
+                # All recipients for this step have been processed
+                continue
+                
+            # Process the next recipient in line
+            recipient_index, lead_data = recipients_to_process[0]
         else:
             lead_data = lead_data_raw
+            recipient_index = 0  # Single recipient case
             
         # Account selection with round-robin (do this before template rendering to get account context)
         granted = False
@@ -185,14 +204,57 @@ def run_once(campaign_id: str, batch_size: int, dry_run: bool = False, since: da
             min_wait = int(get_email_campaign_settings(selected_email_id).get("min_wait_time", 0))
             arbiter.commit(selected_email_id, now_utc, min_wait)
             
-            # Update lead progress
-            next_due = now_utc + timedelta(days=step.get("next_message_day", 0))
-            update_lead_progress(lead_id, {
-                **progress,
-                "current_step_order": current_step_order + 1,
-                "last_sent_at": now_utc,
-                "next_due_at": next_due
-            })
+            # Update lead progress - track per-recipient processing
+            progress = lead.get("progress", {})
+            current_step_order = progress.get("current_step_order", 1)
+            processed_recipients = progress.get("processed_recipients", {})
+            
+            # Mark this recipient as processed for this step
+            recipient_key = f"step_{current_step_order}_recipient_{recipient_index}"
+            processed_recipients[recipient_key] = {
+                "processed_at": now_utc,
+                "email": to_email,
+                "template_id": template_id
+            }
+            
+            # Check if all recipients for this step have been processed
+            lead_data_raw = lead.get("lead_data", {})
+            total_recipients = len(lead_data_raw) if isinstance(lead_data_raw, list) else 1
+            
+            recipients_processed_this_step = sum(1 for key in processed_recipients.keys() 
+                                               if key.startswith(f"step_{current_step_order}_"))
+            
+            if recipients_processed_this_step >= total_recipients:
+                # All recipients processed for this step - advance to next step
+                next_due = now_utc + timedelta(days=step.get("next_message_day", 0))
+                new_progress = {
+                    **progress,
+                    "current_step_order": current_step_order + 1,
+                    "last_sent_at": now_utc,
+                    "next_due_at": next_due,
+                    "processed_recipients": processed_recipients
+                }
+                log.info("worker.step_completed", campaign_id=campaign_id, lead_id=lead_id, 
+                        step_order=current_step_order, total_recipients=total_recipients)
+            else:
+                # More recipients to process for this step - set due time based on min_wait_time
+                settings_doc = get_email_campaign_settings(selected_email_id)
+                min_wait_minutes = int(settings_doc.get("min_wait_time", 0))
+                next_due = now_utc + timedelta(minutes=min_wait_minutes)
+                
+                new_progress = {
+                    **progress,
+                    "last_sent_at": now_utc,
+                    "next_due_at": next_due,
+                    "processed_recipients": processed_recipients
+                }
+                log.info("worker.recipient_processed", campaign_id=campaign_id, lead_id=lead_id, 
+                        step_order=current_step_order, 
+                        recipients_done=recipients_processed_this_step, 
+                        total_recipients=total_recipients,
+                        next_due_minutes=min_wait_minutes)
+            
+            update_lead_progress(lead_id, new_progress)
             
             # Log activity
             insert_activity({

@@ -6,6 +6,7 @@ from app.domain.worker import run_once as worker_run_once
 from app.db.dao_leads import backfill_lead_progress
 from app.db.dao_runtime import recount_account_runtime_state
 from app.db.dao_accounts import get_all_email_accounts
+from app.config.settings import settings
 
 app = typer.Typer()
 
@@ -14,6 +15,56 @@ def init_indexes():
     """Create all MongoDB indexes."""
     ensure_indexes()
     typer.echo("Indexes created successfully.")
+
+@app.command()
+def run_continuous(
+    tick_seconds: int = typer.Option(settings.DISPATCHER_TICK_SECONDS, help="Seconds between dispatcher runs"),
+    batch_size: int = typer.Option(settings.DEFAULT_WORKER_BATCH_SIZE, help="Batch size for each worker"),
+    verbose: bool = typer.Option(False, help="Enable verbose logging")
+):
+    """Run the dispatcher continuously."""
+    import time
+    
+    if verbose:
+        import structlog
+        structlog.configure(
+            processors=[
+                structlog.stdlib.add_log_level,
+                structlog.stdlib.PositionalArgumentsFormatter(),
+                structlog.processors.TimeStamper(fmt="iso"),
+                structlog.processors.StackInfoRenderer(),
+                structlog.processors.format_exc_info,
+                structlog.processors.JSONRenderer()
+            ],
+            logger_factory=structlog.stdlib.LoggerFactory(),
+            wrapper_class=structlog.stdlib.BoundLogger,
+            cache_logger_on_first_use=True,
+        )
+    
+    typer.echo(f"Starting continuous dispatcher with {tick_seconds}s intervals...")
+    typer.echo("Press Ctrl+C to stop")
+    
+    try:
+        while True:
+            try:
+                typer.echo(f"\n--- Running dispatcher at {datetime.now()} ---")
+                dispatcher_run_once(batch_size=batch_size, verbose=verbose)
+                typer.echo("Dispatcher run completed.")
+                
+                typer.echo(f"Sleeping for {tick_seconds} seconds...")
+                time.sleep(tick_seconds)
+                
+            except KeyboardInterrupt:
+                typer.echo("\nReceived interrupt signal. Stopping...")
+                break
+            except Exception as e:
+                typer.echo(f"Error in dispatcher run: {e}")
+                typer.echo(f"Continuing after {tick_seconds} seconds...")
+                time.sleep(tick_seconds)
+                
+    except KeyboardInterrupt:
+        typer.echo("\nDispatcher stopped.")
+
 
 @app.command()
 def run_dispatcher(tick_seconds: int = 15, batch_size: int = 20, verbose: bool = False):
@@ -231,6 +282,187 @@ def continuous_dispatcher(tick_seconds: int = 15, batch_size: int = 20, verbose:
             time.sleep(tick_seconds)
     except KeyboardInterrupt:
         typer.echo("Dispatcher stopped.")
+
+@app.command()
+def list_campaigns():
+    """List all campaigns."""
+    from app.db.client import db
+    
+    campaigns = list(db.campaigns.find({}).limit(10))
+    
+    if not campaigns:
+        typer.echo("No campaigns found.")
+        return
+        
+    typer.echo(f"Found {db.campaigns.count_documents({})} campaigns (showing first 10):")
+    typer.echo()
+    
+    for campaign in campaigns:
+        campaign_id = campaign.get("_id")
+        name = campaign.get("name", "Unnamed")
+        status = campaign.get("status", "unknown")
+        created = campaign.get("created_date", "unknown")
+        
+        typer.echo(f"  {campaign_id}")
+        typer.echo(f"    Name: {name}")
+        typer.echo(f"    Status: {status}")
+        typer.echo(f"    Created: {created}")
+        typer.echo()
+
+
+@app.command()
+def make_lead_due_now(
+    lead_id: str = typer.Argument(..., help="Lead ID to make due now"),
+):
+    """Make a specific lead due now for testing."""
+    from app.db.client import db
+    from bson import ObjectId
+    from datetime import datetime, timezone
+    
+    try:
+        # Find the lead
+        lead = db.campaign_leads.find_one({"_id": ObjectId(lead_id)})
+        if not lead:
+            typer.echo(f"Lead {lead_id} not found.")
+            return
+            
+        # Update next_due_at to now
+        now_utc = datetime.now(timezone.utc)
+        result = db.campaign_leads.update_one(
+            {"_id": ObjectId(lead_id)},
+            {"$set": {"progress.next_due_at": now_utc.replace(tzinfo=None)}}
+        )
+        
+        if result.modified_count > 0:
+            typer.echo(f"Lead {lead_id} is now due for processing.")
+            
+            # Show updated progress
+            updated_lead = db.campaign_leads.find_one({"_id": ObjectId(lead_id)})
+            progress = updated_lead.get("progress", {})
+            current_step = progress.get("current_step_order", "unknown")
+            typer.echo(f"Current step: {current_step}")
+            typer.echo(f"Next due: {progress.get('next_due_at', 'unknown')}")
+        else:
+            typer.echo("Failed to update lead.")
+            
+    except Exception as e:
+        typer.echo(f"Error: {e}")
+
+
+@app.command()
+def show_lead_details(
+    lead_id: str = typer.Argument(..., help="Lead ID to show details for"),
+):
+    """Show detailed information about a specific lead."""
+    from app.db.client import db
+    from bson import ObjectId
+    from datetime import datetime, timezone
+    
+    try:
+        # Find the lead
+        lead = db.campaign_leads.find_one({"_id": ObjectId(lead_id)})
+        if not lead:
+            typer.echo(f"Lead {lead_id} not found.")
+            return
+            
+        campaign_id = lead.get("campaign_id", "unknown")
+        progress = lead.get("progress", {})
+        lead_data = lead.get("lead_data", [])
+        
+        typer.echo(f"Lead ID: {lead_id}")
+        typer.echo(f"Campaign ID: {campaign_id}")
+        typer.echo()
+        
+        typer.echo("Lead Data:")
+        for i, data in enumerate(lead_data):
+            email = data.get("email", "no email")
+            name = data.get("name", "no name")
+            status = data.get("status", "no status")
+            typer.echo(f"  [{i}] {email} - {name} - {status}")
+        typer.echo()
+        
+        typer.echo("Progress:")
+        current_step = progress.get("current_step_order", "not set")
+        last_sent = progress.get("last_sent_at", "never")
+        next_due = progress.get("next_due_at", "not set")
+        stopped = progress.get("stopped", False)
+        
+        typer.echo(f"  Current step: {current_step}")
+        typer.echo(f"  Last sent: {last_sent}")
+        typer.echo(f"  Next due: {next_due}")
+        typer.echo(f"  Stopped: {stopped}")
+        
+        # Check if due now
+        if next_due and next_due != "not set":
+            now_utc = datetime.now(timezone.utc)
+            if isinstance(next_due, datetime):
+                if next_due.tzinfo is None:
+                    next_due = next_due.replace(tzinfo=timezone.utc)
+                is_due = next_due <= now_utc
+                time_diff = next_due - now_utc
+                typer.echo(f"  Is due now: {is_due}")
+                if not is_due:
+                    typer.echo(f"  Time until due: {time_diff}")
+        
+    except Exception as e:
+        typer.echo(f"Error: {e}")
+
+
+@app.command()
+def reset_lead_progress(
+    lead_id: str = typer.Argument(..., help="Lead ID to reset"),
+):
+    """Reset a lead's progress to start from step 1."""
+    from app.db.client import db
+    from bson import ObjectId
+    
+    try:
+        # Reset the lead to step 1 with empty recipient tracking
+        result = db.campaign_leads.update_one(
+            {"_id": ObjectId(lead_id)},
+            {"$set": {"progress": {
+                "current_step_order": 1, 
+                "stopped": False,
+                "processed_recipients": {}
+            }}}
+        )
+        
+        if result.modified_count > 0:
+            typer.echo(f"Lead {lead_id} progress reset to step 1.")
+            typer.echo("All recipients will be processed from the beginning.")
+        else:
+            typer.echo("Lead not found or no changes made.")
+            
+    except Exception as e:
+        typer.echo(f"Error: {e}")
+
+
+@app.command()
+def list_leads():
+    """List campaign leads."""
+    from app.db.client import db
+    
+    leads = list(db.campaign_leads.find({}).limit(10))
+    
+    if not leads:
+        typer.echo("No leads found.")
+        return
+        
+    typer.echo(f"Found {db.campaign_leads.count_documents({})} leads (showing first 10):")
+    typer.echo()
+    
+    for lead in leads:
+        lead_id = lead.get("_id")
+        campaign_id = lead.get("campaign_id")
+        email = lead.get("email", "unknown")
+        status = lead.get("status", "unknown")
+        
+        typer.echo(f"  {lead_id}")
+        typer.echo(f"    Campaign: {campaign_id}")
+        typer.echo(f"    Email: {email}")
+        typer.echo(f"    Status: {status}")
+        typer.echo()
+
 
 if __name__ == "__main__":
     app()
