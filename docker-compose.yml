@@ -1,0 +1,24 @@
+services:
+    mongo:
+        image: mongo:6.0
+        ports:
+            - "27017:27017"
+        volumes:
+            - mongo_data:/data/db
+    app:
+        build: .
+        depends_on:
+            - mongo
+        environment:
+            - MONGO_URI=mongodb+srv://mandipredliodesigns:mandip@portalnew.uxjlc.mongodb.net/
+            - DB_NAME=email_warmup
+            - LOG_LEVEL=INFO
+            - DISPATCHER_TICK_SECONDS=15
+            - DEFAULT_WORKER_BATCH_SIZE=20
+            - DEFAULT_RESERVATION_LOCK_SECONDS=30
+            - SMTP_STARTTLS=true
+            - DAY_BOUNDARY_TZ=UTC
+        ports:
+            - "8000:8000"
+volumes:
+    mongo_data:

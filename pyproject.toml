@@ -1,0 +1,29 @@
+[tool.black]
+line-length = 88
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "W", "C", "B", "I", "N", "D", "UP", "ANN", "S", "T", "Q"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+
+[project]
+name = "emailbot"
+version = "0.1.0"
+description = "Multi-campaign email automation system"
+authors = ["Your Name <your@email.com>"]
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "pymongo>=4.0.0",
+    "jinja2>=3.1.0",
+    "structlog>=23.0.0",
+    "typer>=0.9.0",
+    "pytest>=7.0.0",
+    "freezegun>=1.2.2",
+    "mongomock>=4.1.2",
+    "pytz>=2023.3"
+]
