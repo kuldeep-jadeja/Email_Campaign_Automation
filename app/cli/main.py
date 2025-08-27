@@ -350,6 +350,70 @@ def make_lead_due_now(
 
 
 @app.command()
+def update_lead_statuses():
+    """Update lead statuses based on processed recipients."""
+    from app.db.client import db
+    from datetime import datetime, timezone
+    
+    # Find all leads with processed recipients but not_contacted status
+    leads = list(db.campaign_leads.find({
+        "progress.processed_recipients": {"$exists": True, "$ne": {}}
+    }))
+    
+    updated_count = 0
+    
+    for lead in leads:
+        lead_id = lead["_id"]
+        lead_data = lead.get("lead_data", [])
+        progress = lead.get("progress", {})
+        processed_recipients = progress.get("processed_recipients", {})
+        
+        if not isinstance(lead_data, list):
+            continue
+            
+        updated_lead_data = lead_data.copy()
+        lead_updated = False
+        
+        # Check each recipient
+        for i, recipient in enumerate(lead_data):
+            current_status = recipient.get("status", "not_contacted")
+            
+            # Check if this recipient has been processed in any step
+            recipient_processed = False
+            last_step = None
+            last_contacted = None
+            
+            for key, info in processed_recipients.items():
+                if key.endswith(f"_recipient_{i}"):
+                    recipient_processed = True
+                    # Extract step number from key like "step_1_recipient_0"
+                    step_num = int(key.split("_")[1])
+                    if last_step is None or step_num > last_step:
+                        last_step = step_num
+                        last_contacted = info.get("processed_at")
+            
+            if recipient_processed and current_status == "not_contacted":
+                updated_lead_data[i] = {
+                    **recipient,
+                    "status": "contacted",
+                    "last_contacted_at": last_contacted,
+                    "last_step": last_step
+                }
+                lead_updated = True
+                typer.echo(f"  Updated {recipient.get('email', 'unknown')} status to contacted")
+        
+        if lead_updated:
+            db.campaign_leads.update_one(
+                {"_id": lead_id},
+                {"$set": {"lead_data": updated_lead_data}}
+            )
+            updated_count += 1
+            typer.echo(f"Lead {lead_id} updated")
+    
+    typer.echo(f"Updated {updated_count} leads with correct recipient statuses.")
+
+
+@app.command()
 def show_lead_details(
     lead_id: str = typer.Argument(..., help="Lead ID to show details for"),
 ):
@@ -417,19 +481,43 @@ def reset_lead_progress(
     from bson import ObjectId
     
     try:
+        # Get current lead data
+        lead = db.campaign_leads.find_one({"_id": ObjectId(lead_id)})
+        if not lead:
+            typer.echo("Lead not found.")
+            return
+            
+        # Reset lead_data statuses to not_contacted
+        lead_data = lead.get("lead_data", [])
+        if isinstance(lead_data, list):
+            reset_lead_data = []
+            for recipient in lead_data:
+                reset_recipient = {**recipient}
+                reset_recipient["status"] = "not_contacted"
+                # Remove tracking fields if they exist
+                reset_recipient.pop("last_contacted_at", None)
+                reset_recipient.pop("last_step", None)
+                reset_lead_data.append(reset_recipient)
+        else:
+            reset_lead_data = lead_data
+            
         # Reset the lead to step 1 with empty recipient tracking
         result = db.campaign_leads.update_one(
             {"_id": ObjectId(lead_id)},
-            {"$set": {"progress": {
-                "current_step_order": 1, 
-                "stopped": False,
-                "processed_recipients": {}
-            }}}
+            {"$set": {
+                "progress": {
+                    "current_step_order": 1, 
+                    "stopped": False,
+                    "processed_recipients": {}
+                },
+                "lead_data": reset_lead_data
+            }}
         )
         
         if result.modified_count > 0:
             typer.echo(f"Lead {lead_id} progress reset to step 1.")
             typer.echo("All recipients will be processed from the beginning.")
+            typer.echo("All statuses reset to 'not_contacted'.")
         else:
             typer.echo("Lead not found or no changes made.")
             
@@ -463,6 +551,78 @@ def list_leads():
         typer.echo(f"    Status: {status}")
         typer.echo()
 
+@app.command()
+def show_due_leads():
+    """Show all leads that are currently due for processing."""
+    from app.db.client import db
+    from datetime import datetime, timezone
+    
+    now_utc = datetime.now(timezone.utc)
+    
+    # Query for leads that are due across all campaigns
+    query = {
+        "$or": [
+            {"progress": {"$exists": False}},  # No progress means never sent
+            {
+                "progress.stopped": {"$ne": True},
+                "$or": [
+                    {"progress.next_due_at": {"$lte": now_utc}},
+                    {"progress.last_sent_at": {"$exists": False}}
+                ]
+            }
+        ]
+    }
+    
+    leads = list(db.campaign_leads.find(query, {"lead_data": 1, "progress": 1, "campaign_id": 1}).limit(100))
+    
+    if not leads:
+        typer.echo("No leads are currently due for processing.")
+        return
+    
+    typer.echo(f"Found {len(leads)} leads due for processing:")
+    typer.echo()
+    
+    for lead in leads:
+        lead_id = str(lead.get("_id"))
+        campaign_id = str(lead.get("campaign_id"))
+        progress = lead.get("progress", {})
+        current_step = progress.get("current_step_order", 1)
+        next_due = progress.get("next_due_at")
+        last_sent = progress.get("last_sent_at")
+        
+        # Get lead data for email info
+        lead_data_raw = lead.get("lead_data", [])
+        if isinstance(lead_data_raw, list) and lead_data_raw:
+            first_email = lead_data_raw[0].get("email", "unknown")
+            total_recipients = len(lead_data_raw)
+        else:
+            first_email = lead_data_raw.get("email", "unknown") if isinstance(lead_data_raw, dict) else "unknown"
+            total_recipients = 1
+        
+        typer.echo(f"Lead ID: {lead_id}")
+        typer.echo(f"  Campaign: {campaign_id}")
+        typer.echo(f"  Primary Email: {first_email}")
+        typer.echo(f"  Recipients: {total_recipients}")
+        typer.echo(f"  Current Step: {current_step}")
+        typer.echo(f"  Next Due: {next_due}")
+        typer.echo(f"  Last Sent: {last_sent}")
+        
+        if next_due:
+            # Ensure both datetimes are timezone-aware for comparison
+            if next_due.tzinfo is None:
+                from datetime import timezone
+                next_due = next_due.replace(tzinfo=timezone.utc)
+            
+            if next_due <= now_utc:
+                overdue_minutes = int((now_utc - next_due).total_seconds() / 60)
+                typer.echo(f"  Status: OVERDUE by {overdue_minutes} minutes")
+            else:
+                due_minutes = int((next_due - now_utc).total_seconds() / 60)
+                typer.echo(f"  Status: Due in {due_minutes} minutes")
+        else:
+            typer.echo(f"  Status: Ready to start")
+        
+        typer.echo()
 
 if __name__ == "__main__":
     app()

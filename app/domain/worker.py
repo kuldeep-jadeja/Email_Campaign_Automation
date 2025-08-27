@@ -217,8 +217,22 @@ def run_once(campaign_id: str, batch_size: int, dry_run: bool = False, since: da
                 "template_id": template_id
             }
             
-            # Check if all recipients for this step have been processed
+            # Update recipient status in lead_data array
             lead_data_raw = lead.get("lead_data", {})
+            updated_lead_data = lead_data_raw.copy() if isinstance(lead_data_raw, list) else lead_data_raw
+            
+            if isinstance(updated_lead_data, list) and recipient_index < len(updated_lead_data):
+                # Update the status for this specific recipient
+                updated_lead_data[recipient_index] = {
+                    **updated_lead_data[recipient_index],
+                    "status": "contacted",
+                    "last_contacted_at": now_utc,
+                    "last_step": current_step_order
+                }
+                log.info("worker.status_updated", campaign_id=campaign_id, lead_id=lead_id,
+                        recipient_email=to_email, old_status="not_contacted", new_status="contacted")
+            
+            # Check if all recipients for this step have been processed
             total_recipients = len(lead_data_raw) if isinstance(lead_data_raw, list) else 1
             
             recipients_processed_this_step = sum(1 for key in processed_recipients.keys() 
@@ -254,7 +268,20 @@ def run_once(campaign_id: str, batch_size: int, dry_run: bool = False, since: da
                         total_recipients=total_recipients,
                         next_due_minutes=min_wait_minutes)
             
+            # Update both progress and lead_data in a single operation
+            update_data = {"progress": new_progress}
+            if isinstance(updated_lead_data, list):
+                update_data["lead_data"] = updated_lead_data
+                
             update_lead_progress(lead_id, new_progress)
+            
+            # Also update the lead_data separately if it was modified
+            if isinstance(updated_lead_data, list):
+                from bson import ObjectId
+                db.campaign_leads.update_one(
+                    {"_id": ObjectId(lead_id)},
+                    {"$set": {"lead_data": updated_lead_data}}
+                )
             
             # Log activity
             insert_activity({
