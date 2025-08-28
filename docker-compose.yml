@@ -10,8 +10,8 @@ services:
         depends_on:
             - mongo
         environment:
-            - MONGO_URI=mongodb+srv://mandipredliodesigns:mandip@portalnew.uxjlc.mongodb.net/
-            - DB_NAME=email_warmup
+            - MONGO_URI=mongodb+srv://username:password@cluster.mongodb.net/
+            - DB_NAME=Database_name
             - LOG_LEVEL=INFO
             - DISPATCHER_TICK_SECONDS=15
             - DEFAULT_WORKER_BATCH_SIZE=20
@@ -22,3 +22,4 @@ services:
             - "8000:8000"
 volumes:
     mongo_data:
+
