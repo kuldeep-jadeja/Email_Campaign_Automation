@@ -5,7 +5,7 @@ from datetime import datetime
 
 def get_due_leads(campaign_id: str, now_utc: datetime, batch_size: int) -> List[dict]:
     query = {
-        "campaign_id": campaign_id,
+        "campaign_id": ObjectId(campaign_id),  # Convert string to ObjectId
         "$or": [
             {"progress": {"$exists": False}},  # No progress means never sent
             {

@@ -148,6 +148,9 @@ def run_once(campaign_id: str, batch_size: int, dry_run: bool = False, since: da
             'sender_first_name': sig_doc.get("first_name", "") if sig_doc else "",
             'sender_last_name': sig_doc.get("last_name", "") if sig_doc else "",
             'sender_email': selected_account.get("email", ""),
+            # Custom variables for sender (to avoid confusion with recipient names)
+            'first_name_me': sig_doc.get("first_name", "") if sig_doc else "",
+            'last_name_me': sig_doc.get("last_name", "") if sig_doc else "",
             # Campaign context
             'campaign_id': campaign_id,
             'step_order': current_step_order,
@@ -239,17 +242,35 @@ def run_once(campaign_id: str, batch_size: int, dry_run: bool = False, since: da
                                                if key.startswith(f"step_{current_step_order}_"))
             
             if recipients_processed_this_step >= total_recipients:
-                # All recipients processed for this step - advance to next step
-                next_due = now_utc + timedelta(days=step.get("next_message_day", 0))
-                new_progress = {
-                    **progress,
-                    "current_step_order": current_step_order + 1,
-                    "last_sent_at": now_utc,
-                    "next_due_at": next_due,
-                    "processed_recipients": processed_recipients
-                }
-                log.info("worker.step_completed", campaign_id=campaign_id, lead_id=lead_id, 
-                        step_order=current_step_order, total_recipients=total_recipients)
+                # All recipients processed for this step - check if there's a next step
+                next_step_order = current_step_order + 1
+                next_step_info = next((s for s in steps if s.get("order") == next_step_order), None)
+                
+                if next_step_info:
+                    # There's a next step - advance to it
+                    next_due = now_utc + timedelta(days=step.get("next_message_day", 0))
+                    new_progress = {
+                        **progress,
+                        "current_step_order": next_step_order,
+                        "last_sent_at": now_utc,
+                        "next_due_at": next_due,
+                        "processed_recipients": processed_recipients
+                    }
+                    log.info("worker.step_completed", campaign_id=campaign_id, lead_id=lead_id, 
+                            step_order=current_step_order, total_recipients=total_recipients,
+                            next_step=next_step_order)
+                else:
+                    # No more steps - mark sequence as completed
+                    new_progress = {
+                        **progress,
+                        "stopped": True,
+                        "reason": "completed",
+                        "last_sent_at": now_utc,
+                        "completed_at": now_utc,
+                        "processed_recipients": processed_recipients
+                    }
+                    log.info("worker.sequence_completed", campaign_id=campaign_id, lead_id=lead_id, 
+                            step_order=current_step_order, total_recipients=total_recipients)
             else:
                 # More recipients to process for this step - set due time based on min_wait_time
                 settings_doc = get_email_campaign_settings(selected_email_id)

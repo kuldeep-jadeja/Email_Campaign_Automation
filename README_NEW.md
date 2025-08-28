@@ -294,29 +294,14 @@ default("https://example.com")}} Best regards, {{account_signature}}
 
 **Available Template Variables:**
 
-### Recipient Information:
-
 -   `first_name`, `last_name`, `name` - Recipient information
 -   `email` - Recipient email address
 -   `company_name`, `website` - Company information
-
-### Sender Information:
-
 -   `sender_name`, `sender_first_name`, `sender_last_name` - Sender information
 -   `sender_email` - Sender email address
 -   `account_signature` - Account signature
-
-### Custom Sender Variables (Recommended):
-
--   `first_name_me` - Sender's first name from email_general_settings.first_name
--   `last_name_me` - Sender's last name from email_general_settings.last_name
-
-### System Context:
-
 -   `campaign_id`, `step_order` - Campaign context
 -   Custom fields from lead data
-
-**Note**: Use `{{first_name_me}}` and `{{last_name_me}}` to avoid confusion between recipient and sender names.
 
 ## 📊 Monitoring and Logging
 
